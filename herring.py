@@ -1,6 +1,6 @@
 import subprocess, os, copy, logging, itertools, sys, pickle
 from Bio import SeqIO
-logging.basicConfig(filename='GIfinder.log', level=logging.DEBUG, format='%(message)s')
+logging.basicConfig(filename='herring.log', level=logging.DEBUG, format='%(message)s')
 sys.path.insert(0, '/home/asier/PycharmProjects/flex2')
 import blastParser
 
@@ -67,11 +67,11 @@ class GapFamily():
             self.parents = (refName, parents1)
 
         for gap in self.gapList:
-            if gap.parentSeqs[0] != self.parents[0]:
+            if gap.parents[0] != self.parents[0]:
                 newParent = gap.corePos
                 newCore = gap.parentPos
 
-                gap.parentSeqs = self.parents
+                gap.parents = self.parents
                 gap.corePos = newCore
                 gap.parentPos = newParent
 
@@ -119,7 +119,7 @@ class GapFamily():
 class Gap():
     def __init__(self, gapList, family):
         self.family = family
-        self.parentSeqs = (gapList[0], gapList[4])
+        self.parents = (gapList[0], gapList[4])
         self.corePos = (gapList[1], gapList[2])
         self.parentPos = (gapList[5], gapList[6])
         self.type = gapList[8]
@@ -128,14 +128,14 @@ class Gap():
         self.leftMatch = []
         self.rightMatch = []
         no = str(len(self.family.gapList))
-        self.name = str(str(self.parentSeqs[0]) + '-' + str(self.parentSeqs[1]) + '_' + no)
+        self.name = str(str(self.parents[0]) + '-' + str(self.parents[1]) + '_' + no)
 
     def buildInfoStr(self):
         diagStr = ''
         diagStr += ('Gap Name: {}\n'.format(self.name))
         diagStr += ('PARENT INFO:\n')
-        diagStr += ('Parent 1: {}\n\t{} - {}\n'.format(self.parentSeqs[0], self.corePos[0], self.corePos[1]))
-        diagStr += ('Parent 2: {}\n\t{} - {}\n'.format(self.parentSeqs[1], self.parentPos[0], self.parentPos[1]))
+        diagStr += ('Parent 1: {}\n\t{} - {}\n'.format(self.parents[0], self.corePos[0], self.corePos[1]))
+        diagStr += ('Parent 2: {}\n\t{} - {}\n'.format(self.parents[1], self.parentPos[0], self.parentPos[1]))
         diagStr += ('EDGES\nLEFT BORDER:\n')
         for match in self.leftMatch:
             diagStr += ('\t{}\n'.format(match.name))
@@ -149,10 +149,10 @@ class Gap():
         gapSeq = None
         # get sequence from the fasta file
         for filePair in fileList:
-            if self.parentSeqs[parent] in filePair:
+            if self.parents[parent] in filePair:
                 gapName = filePair[parent]
         for record in SeqIO.parse(gapName, 'fasta'):
-            if record.name == self.parentSeqs[1]:
+            if record.name == self.parents[1]:
                 gapSeq = record.seq
         return gapSeq
 
@@ -163,14 +163,14 @@ class Gap():
         gapSeqRight = (0, None)
 
         #get sequence from the fasta file
-        '''
+
         for filePair in fileList:
             if self.parents[0] in filePair:
                 gapName = filePair[1]
         for record in SeqIO.parse(gapName, 'fasta'):
             if record.name == self.parents[0]:
                 gapSeq = record.seq
-        '''
+
 
         #Check if we can pick a sequence of the required size without taking a gap by mistake:
         adjGaps = self.family.findAdjacentGaps(self)
@@ -485,7 +485,7 @@ def compareGapFamilies(gapFamily1, gapFamily2, size):
 
 if __name__ == '__main__':
     masterFamilyList = []
-    '''
+
     blastFamilies = performBlastAgainstCore(fastaList, refFasta, 2000, 1000000, masterFamilyList)
     for family in masterFamilyList:
         family.equalize()
@@ -494,8 +494,8 @@ if __name__ == '__main__':
     familyCombList = itertools.combinations(masterFamilyList, 2)
     for familyPair in familyCombList:
         compareGapFamilies(familyPair[0], familyPair[1], 5000)
-    '''
-    masterFamilyList = loadMasterFamilyList('masterListTest.pk1')
+
+    saveMasterFamilyList(masterFamilyList, 'masterListTest.pk1')
     for family in masterFamilyList:
         print(len(family.gapList))
         family.writeGapInfo(family.findOrphans(type=['left']), 'diagnostic-Left' + '-' + str(family.parents[0]) + '.txt')
