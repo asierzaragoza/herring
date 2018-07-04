@@ -33,6 +33,18 @@ class GapFamily():
                 if i < len(gapList) - 1:
                     output.write('-----------------------------------\n\n')
 
+    def getParentSeq(self, parent=0):
+        gapName = ''
+        gapSeq = None
+        # get sequence from the fasta file
+        for filePair in fileList:
+            if self.parents[parent] in filePair:
+                gapName = filePair[parent]
+        for record in SeqIO.parse(gapName, 'fasta'):
+            if record.name == self.parents[1]:
+                gapSeq = record.seq
+        return gapSeq
+
 
     def createStrList(self):
         strList = []
@@ -62,18 +74,22 @@ class GapFamily():
 
     def equalize(self):
         refName = getRefFastaName(refFasta)
+        logging.info('parents[0] = {}, refName = {}'.format(self.parents[0], refName))
         if self.parents[0] == refName:
             parents1 = self.parents[0]
             self.parents = (refName, parents1)
-
+            logging.info('fixed: parent[0] (parent) is {} and parent[1] (core) is {}'.format(self.parents[0], self.parents[0]))
         for gap in self.gapList:
+            logging.info('gap.parents[0] = {}, family.parents[0] is {}'.format(gap.parents[0], self.parents[0]))
             if gap.parents[0] != self.parents[0]:
-                newParent = gap.corePos
-                newCore = gap.parentPos
+
+                newParent = copy.copy(gap.corePos)
+                newCore = copy.copy(gap.parentPos)
 
                 gap.parents = self.parents
                 gap.corePos = newCore
                 gap.parentPos = newParent
+            logging.info('parents = {} , corePos = {} , parentPos = {}'.format(gap.parents, gap.corePos, gap.parentPos))
 
     def __iter__(self):
         return iter(self.gapList)
@@ -120,8 +136,8 @@ class Gap():
     def __init__(self, gapList, family):
         self.family = family
         self.parents = (gapList[0], gapList[4])
-        self.corePos = (gapList[1], gapList[2])
-        self.parentPos = (gapList[5], gapList[6])
+        self.corePos = (gapList[5], gapList[6])
+        self.parentPos = (gapList[1], gapList[2])
         self.type = gapList[8]
         self.leftBorder = None
         self.rightBorder = None
@@ -144,32 +160,25 @@ class Gap():
             diagStr += ('\t{}\n'.format(match.name))
         return diagStr
 
-    def getParentSeq(self, parent=1):
+    def getParentSeq(self, parent=0):
         gapName = ''
         gapSeq = None
         # get sequence from the fasta file
         for filePair in fileList:
             if self.parents[parent] in filePair:
                 gapName = filePair[parent]
-        for record in SeqIO.parse(gapName, 'fasta'):
-            if record.name == self.parents[1]:
+        for record in SeqIO.parse(gapName + '.fasta', 'fasta'):
+            if record.name == gapName:
                 gapSeq = record.seq
         return gapSeq
 
     def getBorderSequence(self, size):
-        gapName = ''
+        logging.info('finding border sequences for {} with size {}'.format(self.name, size))
+        logging.info('parent sequence used is {}'.format(self.parents[0]))
         gapSeq = self.getParentSeq()
         gapSeqLeft = (0, None)
         gapSeqRight = (0, None)
 
-        #get sequence from the fasta file
-
-        for filePair in fileList:
-            if self.parents[0] in filePair:
-                gapName = filePair[1]
-        for record in SeqIO.parse(gapName, 'fasta'):
-            if record.name == self.parents[0]:
-                gapSeq = record.seq
 
 
         #Check if we can pick a sequence of the required size without taking a gap by mistake:
@@ -183,6 +192,11 @@ class Gap():
                 gapSeqLeft = ((self.parentPos[0] - leftGapPos), gapSeq[leftGapPos:self.parentPos[0]])
             else:
                 gapSeqLeft = (size, gapSeq[(self.parentPos[0] - size):self.parentPos[0]])
+        else:
+            if (self.parentPos[0] - size) > 0:
+                gapSeqLeft = (size, gapSeq[(self.parentPos[0] - size):self.parentPos[0]])
+            else:
+                gapSeqLeft = (size, gapSeq[:self.parentPos[0]])
 
 
         #right border is next
@@ -193,10 +207,16 @@ class Gap():
                 gapSeqRight = ((rightGapPos - self.parentPos[1]), gapSeq[self.parentPos[1]:rightGapPos])
             else:
                 gapSeqRight = (size, gapSeq[self.parentPos[1]:self.parentPos[1] + size])
+        else:
+            if (self.parentPos[1] + size) < len(gapSeq):
+                gapSeqRight = (size, gapSeq[self.parentPos[1]:self.parentPos[1] + size])
+            else:
+                gapSeqRight = (size, gapSeq[self.parentPos[1]:])
 
         #then return both borders
         self.leftBorder = gapSeqLeft
         self.rightBorder = gapSeqRight
+        logging.info('borders for {} found: left border is {}, while right border is {}'.format(self.name,[(self.parentPos[0] - size), self.parentPos[0]], [self.parentPos[1], self.parentPos[1] + size] ))
         return [gapSeqLeft, gapSeqRight]
 
     def addBorderGapRef(self, gap, type):
@@ -231,7 +251,7 @@ def loadMasterFamilyList(filename):
 
 def alignSeqsByStretcher(seq1, seq2, gapOpen = 1000, gapExtend = 1000):
     logging.info('Aligning 2 Sequences')
-    outfile = 'stretcher.aln.temp'
+    outfile = './temp/stretcher.aln.temp'
     logging.info('Running stretcher...')
     subprocess.call([stretcherPath, '-asequence', seq1, '-bsequence', seq2, '-outfile', outfile, '-gapopen', str(gapOpen), '-gapextend',
           str(gapExtend)])
@@ -404,13 +424,19 @@ def compareTwoGaps(gap1, gap2, size, storeResults = True):
     # Get the border sequences for both gaps
     gap1borders = gap1.getBorderSequence(size)
     gap2borders = gap2.getBorderSequence(size)
-    if gap1borders[0][1] != None and gap2borders[0][1] != None:
+    logging.info(gap1borders)
+    logging.info(gap2borders)
+
+    #equalize borders if required
+    if gap1borders[0][1] != None and gap2borders[0][1] != None and gap1borders[0][1] != gap2borders[0][1]:
+        equalizeBorderSizes(gap1borders, gap2borders)
+    elif gap1borders[1][1] != None and gap2borders[1][1] != None and gap1borders[1][1] != gap2borders[1][1]:
         equalizeBorderSizes(gap1borders, gap2borders)
 
 
 
     #call stretcher and get the alignment. first, prepare the fasta files
-    tempFastaFiles = ['gap1left.temp.fasta', 'gap1right.temp.fasta', 'gap2left.temp.fasta', 'gap2right.temp.fasta']
+    tempFastaFiles = ['./temp/gap1left.temp.fasta', './temp/gap1right.temp.fasta', './temp/gap2left.temp.fasta', './temp/gap2right.temp.fasta']
     rightalnResults = None
     leftalnResults = None
     logging.info('comparing left border')
@@ -421,9 +447,9 @@ def compareTwoGaps(gap1, gap2, size, storeResults = True):
         with open(tempFastaFiles[2], 'w') as gap2left:
             gap2left.write('>gap2left\n')
             gap2left.write(str(gap2borders[0][1]))
-        leftalnResults = alignSeqsByStretcher('gap1left.temp.fasta', 'gap2left.temp.fasta')
+        leftalnResults = alignSeqsByStretcher('./temp/gap1left.temp.fasta', './temp/gap2left.temp.fasta')
     else:
-        logging.info('No sequences for the left border')
+        logging.info('No sequences for the left border: border 1 is {} and border 2 is {}'.format(len(gap1borders[0][1]), len(gap2borders[0][1])))
         leftalnResults = {'Identity':-1, 'Gaps':0}
 
     logging.info('comparing right border')
@@ -434,7 +460,7 @@ def compareTwoGaps(gap1, gap2, size, storeResults = True):
         with open(tempFastaFiles[3], 'w') as gap2right:
             gap2right.write('>gap2right\n')
             gap2right.write(str(gap2borders[1][1]))
-        rightalnResults = alignSeqsByStretcher('gap1right.temp.fasta', 'gap2right.temp.fasta')
+        rightalnResults = alignSeqsByStretcher('./temp/gap1right.temp.fasta', './temp/gap2right.temp.fasta')
     else:
         logging.info('No sequences for the right border')
         rightalnResults = {'Identity': -1, 'Gaps': 0}
@@ -475,6 +501,9 @@ def compareGapFamilies(gapFamily1, gapFamily2, size):
     currComb = 0
     combList = iter([(x, y) for x in gapFamily1.gapList for y in gapFamily2.gapList])
 
+    if not os.path.exists('./temp/'):
+        os.mkdir('temp')
+
     for gapPair in combList:
         currComb += 1
         print('{} / {}'.format(currComb, totalNoOfCombinations))
@@ -487,7 +516,9 @@ if __name__ == '__main__':
     masterFamilyList = []
 
     blastFamilies = performBlastAgainstCore(fastaList, refFasta, 2000, 1000000, masterFamilyList)
+    os.remove(os.curdir + '/blastSeqs.blastn')
     for family in masterFamilyList:
+        print('HONK')
         family.equalize()
 
     #Perform comparisons
@@ -495,10 +526,16 @@ if __name__ == '__main__':
     for familyPair in familyCombList:
         compareGapFamilies(familyPair[0], familyPair[1], 5000)
 
-    saveMasterFamilyList(masterFamilyList, 'masterListTest.pk1')
+    #Save the gap file, just in case something breaks so we don't have to do the analysis all over again
+
+    saveMasterFamilyList(masterFamilyList, 'masterListTest3.pk1')
+
+    #masterFamilyList = loadMasterFamilyList('masterListTest.pk1')
+
     for family in masterFamilyList:
         print(len(family.gapList))
-        family.writeGapInfo(family.findOrphans(type=['left']), 'diagnostic-Left' + '-' + str(family.parents[0]) + '.txt')
+        family.writeGapInfo(family.findOrphans(type = ('left', 'right')), 'diagnostic-All' + '-' + str(family.parents[0]) + '.txt')
+        family.writeGapInfo([item for item in family.gapList if item not in family.findOrphans(type=('left', 'right', 'both'))], 'diagnostic-Good' + '-' + str(family.parents[0]) + '.txt')
 
 
 
