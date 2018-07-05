@@ -1,4 +1,4 @@
-import subprocess, os, copy, logging, itertools, sys, pickle
+import subprocess, os, copy, logging, itertools, sys, pickle, time
 from Bio import SeqIO
 logging.basicConfig(filename='herring.log', level=logging.DEBUG, format='%(message)s')
 sys.path.insert(0, '/home/asier/PycharmProjects/flex2')
@@ -8,7 +8,7 @@ import blastParser
 #stretcherPath = 'C:\mEMBOSS\stretcher.exe'
 stretcherPath = '/usr/bin/stretcher'
 blastPath = '/opt/ncbi-blast-2.6.0+/bin/'
-fastaList = ['WCFS1.fasta', 'LP2.fasta']
+fastaList = ['WCFS1.fasta', 'LP2.fasta', 'B21.fasta']
 fastaListLengths = {}
 refFasta = 'lactobacillus.core.fasta'
 
@@ -44,7 +44,6 @@ class GapFamily():
             if record.name == self.parents[1]:
                 gapSeq = record.seq
         return gapSeq
-
 
     def createStrList(self):
         strList = []
@@ -93,6 +92,13 @@ class GapFamily():
 
     def __iter__(self):
         return iter(self.gapList)
+
+    def getGapsByType(self, type='analyze'):
+        targetList = []
+        for gap in self.gapList:
+            if gap.type == type:
+                targetList.append(gap)
+        return targetList
 
     def closeGaps(self, rejectedGaps = ()):
         #recursive algorithm,looks completely insane but it might work?
@@ -150,8 +156,8 @@ class Gap():
         diagStr = ''
         diagStr += ('Gap Name: {}\n'.format(self.name))
         diagStr += ('PARENT INFO:\n')
-        diagStr += ('Parent 1: {}\n\t{} - {}\n'.format(self.parents[0], self.corePos[0], self.corePos[1]))
-        diagStr += ('Parent 2: {}\n\t{} - {}\n'.format(self.parents[1], self.parentPos[0], self.parentPos[1]))
+        diagStr += ('Parent 1: {}\n\t{} - {}\n'.format(self.parents[1], self.corePos[0], self.corePos[1]))
+        diagStr += ('Parent 2: {}\n\t{} - {}\n'.format(self.parents[0], self.parentPos[0], self.parentPos[1]))
         diagStr += ('EDGES\nLEFT BORDER:\n')
         for match in self.leftMatch:
             diagStr += ('\t{}\n'.format(match.name))
@@ -216,7 +222,7 @@ class Gap():
         #then return both borders
         self.leftBorder = gapSeqLeft
         self.rightBorder = gapSeqRight
-        logging.info('borders for {} found: left border is {}, while right border is {}'.format(self.name,[(self.parentPos[0] - size), self.parentPos[0]], [self.parentPos[1], self.parentPos[1] + size] ))
+        logging.info('borders for {} found: left border is {}, while right border is {}'.format(self.name,[(self.parentPos[0] - self.leftBorder[0]), self.parentPos[0]], [self.parentPos[1], self.parentPos[1] + self.rightBorder[0]] ))
         return [gapSeqLeft, gapSeqRight]
 
     def addBorderGapRef(self, gap, type):
@@ -250,7 +256,7 @@ def loadMasterFamilyList(filename):
         return pickle.load(input)
 
 def alignSeqsByStretcher(seq1, seq2, gapOpen = 1000, gapExtend = 1000):
-    logging.info('Aligning 2 Sequences')
+    logging.info('Aligning 2 Sequences by Stretcher')
     outfile = './temp/stretcher.aln.temp'
     logging.info('Running stretcher...')
     subprocess.call([stretcherPath, '-asequence', seq1, '-bsequence', seq2, '-outfile', outfile, '-gapopen', str(gapOpen), '-gapextend',
@@ -270,6 +276,94 @@ def alignSeqsByStretcher(seq1, seq2, gapOpen = 1000, gapExtend = 1000):
         os.remove(outfile)
     logging.info('Alignment Stats are as follows: {}'.format(statsDict2))
     return statsDict2
+
+def alignSeqsByBlast(seq1, seq2, borderSize):
+    logging.info('Aligning 2 Sequences by Blast')
+    outfile = './temp/blastResults.temp.blastn'
+    logging.info('Running blastn...')
+    subprocess.call([blastPath + 'blastn', '-query', seq1, '-subject', seq2, '-out', outfile, '-outfmt', '6'])
+    statsDict = {'Matches%': 0, 'AlnLen': 0, 'Gaps': 0, 'Mismatches': 0}
+    if os.stat(outfile).st_size > 0:
+        logging.info('There was a match!')
+        with open(outfile, 'r') as blastHandle:
+            statsDict = {'Matches%':0 , 'AlnLen': 0, 'Gaps': 0, 'Mismatches' : 0}
+            #remember: order is queryID / subjectID / percentage of identical matches / alignment length / n of mismatches / n of gaps / start in query
+            # end in query / start in subject / end in subject / E-value / bitscore
+            blastLineInfo = blastHandle.readline().split('\t')
+            statsDict['Matches%'] = float(blastLineInfo[2])
+            statsDict['AlnLen'] = float(int(blastLineInfo[3]) / borderSize)
+            statsDict['Mismatches'] = int(blastLineInfo[4])
+            statsDict['Gaps'] = int(blastLineInfo[5])
+
+    else:
+        logging.info('No match found')
+    os.remove(outfile)
+    return statsDict
+
+
+
+def findAllGaps(blastFamily, thresholdMin, thresholdAnalysis, masterFamilyList):
+    logging.info('Looking for gaps...')
+    logging.info('ThresholdMin is {}, ThresholdAnalysis is {}'.format(thresholdMin, thresholdAnalysis))
+
+    blastFamily._equalize()
+    blastFamily.sortHits()
+
+    logging.info('N of total Blasts: {}'.format(len(blastFamily.blastList)))
+    blastList = blastFamily.blastList
+    gapList = []
+
+    for i in range(0, len(blastList) - 1):
+        logging.debug('Iteration n {}'.format(i))
+
+        # Get the 2 blasts to compare
+        fstBlast = copy.copy(blastList[i])
+        scdBlast = copy.copy(blastList[i + 1])
+
+        # Check if the blasts are reversed, and if they are fix them
+        if fstBlast.seq1pos[1] < fstBlast.seq1pos[0] or fstBlast.seq1pos[1] < fstBlast.seq1pos[0]:
+            fstBlast.seq1pos = (fstBlast.seq1pos[1], fstBlast.seq1pos[0])
+        if scdBlast.seq1pos[1] < scdBlast.seq1pos[0] or scdBlast.seq1pos[1] < scdBlast.seq1pos[0]:
+            scdBlast.seq1pos = (scdBlast.seq1pos[1], scdBlast.seq1pos[0])
+
+        # calculate distance between both blasts in both sequences
+        logging.info('blast1pos: {} - {}'.format(fstBlast.seq1pos[0], fstBlast.seq1pos[1]))
+        logging.info('blast2pos: {} - {}'.format(scdBlast.seq1pos[0], scdBlast.seq1pos[1]))
+        seq1dtce = (scdBlast.seq1pos[0] - fstBlast.seq1pos[1])
+        seq2dtce = (scdBlast.seq2pos[0] - fstBlast.seq2pos[1])
+        logging.debug('Distances between blasts: seq1 {}, seq2 {}'.format(seq1dtce, seq2dtce))
+        total = 0
+        # Check if the distances in both sequences meet the required threshold
+        if seq1dtce > thresholdMin:
+            total += 1
+        if seq2dtce > thresholdMin:
+            total += 1
+
+        # then assign a category depending on the distances
+        # gapList is: parent1, seq1pos1, seq1pos2, seq1dtce, parent2, seq2pos1, seq2pos2, seq2dtce, type
+        if total == 0:
+            logging.debug('Total is {}, which means there is no gap'.format(total))
+            pass
+        elif total > 0:
+            logging.debug('Total is {}, which means there is a gap'.format(total))
+            type = 'ignore'
+
+            if seq1dtce + seq2dtce > thresholdAnalysis:
+                type = 'analyze'
+
+            gapList.append(
+                [fstBlast.parents[0], fstBlast.seq1pos[1], scdBlast.seq1pos[0], seq1dtce, fstBlast.parents[1],
+                 fstBlast.seq2pos[1], scdBlast.seq2pos[0], seq2dtce, type])
+            logging.debug('Sotring gap as gapList {}'.format(
+                [fstBlast.parents[0], fstBlast.seq1pos[1], scdBlast.seq1pos[0], seq1dtce, fstBlast.parents[1],
+                 fstBlast.seq2pos[1], scdBlast.seq2pos[0], seq2dtce, type]))
+
+    # Sort the list by seq1pos1
+    gapList.sort(key=lambda x: x[1])
+    # create gap family, then add it to the master list
+    if len(gapList) > 0:
+        newGapFamily = GapFamily(gapList)
+        masterFamilyList.append(newGapFamily)
 
 def findGaps(blastFamily, thresholdMin, thresholdMax, masterFamilyList):
     logging.info('Looking for gaps...')
@@ -325,7 +419,6 @@ def findGaps(blastFamily, thresholdMin, thresholdMax, masterFamilyList):
     #Sort the list by seq1pos1
     gapList.sort(key=lambda x : x[1])
     #create gap family, then add it to the master list
-    print(gapList)
     if len(gapList) > 0:
         newGapFamily = GapFamily(gapList)
         masterFamilyList.append(newGapFamily)
@@ -376,7 +469,7 @@ def performBlastAgainstCore(fastaList, refFasta, minThres, maxThres, masterFamil
             family.removeInternalHits()
             family.removeSamePosHits()
             family.removeStrangeHits()
-            findGaps(family, minThres, maxThres, masterFamilyList)
+            findAllGaps(family, thresholdMin=minThres, thresholdAnalysis=maxThres, masterFamilyList=masterFamilyList)
 
 def equalizeBorderSizes(gap1borders, gap2borders):
 
@@ -401,7 +494,7 @@ def equalizeBorderSizes(gap1borders, gap2borders):
 
 
     #right border:
-    elif (gap1borders[1][0] + gap2borders[1][0]) > 0:
+    if (gap1borders[1][0] + gap2borders[1][0]) > 0:
         if gap1borders[1][0] != gap2borders[1][0]:
             logging.debug('right side borders are not of the same size! gap1: {}, gap2: {}'.format(gap1borders[1][0],
                                                                                                     gap2borders[1][0]))
@@ -428,9 +521,9 @@ def compareTwoGaps(gap1, gap2, size, storeResults = True):
     logging.info(gap2borders)
 
     #equalize borders if required
-    if gap1borders[0][1] != None and gap2borders[0][1] != None and gap1borders[0][1] != gap2borders[0][1]:
+    if gap1borders[0][1] != None and gap2borders[0][1] != None and gap1borders[0][0] != gap2borders[0][0]:
         equalizeBorderSizes(gap1borders, gap2borders)
-    elif gap1borders[1][1] != None and gap2borders[1][1] != None and gap1borders[1][1] != gap2borders[1][1]:
+    if gap1borders[1][1] != None and gap2borders[1][1] != None and gap1borders[1][0] != gap2borders[1][0]:
         equalizeBorderSizes(gap1borders, gap2borders)
 
 
@@ -447,10 +540,10 @@ def compareTwoGaps(gap1, gap2, size, storeResults = True):
         with open(tempFastaFiles[2], 'w') as gap2left:
             gap2left.write('>gap2left\n')
             gap2left.write(str(gap2borders[0][1]))
-        leftalnResults = alignSeqsByStretcher('./temp/gap1left.temp.fasta', './temp/gap2left.temp.fasta')
+        leftalnResults = alignSeqsByBlast('./temp/gap1left.temp.fasta', './temp/gap2left.temp.fasta', gap1borders[0][0])
     else:
         logging.info('No sequences for the left border: border 1 is {} and border 2 is {}'.format(len(gap1borders[0][1]), len(gap2borders[0][1])))
-        leftalnResults = {'Identity':-1, 'Gaps':0}
+        rightalnResults = {'Identity': -1, 'Gaps': 0, 'Matches%': 0, 'AlnLen': 0, 'Mismatches': 0}
 
     logging.info('comparing right border')
     if gap1borders[1][1] != None and gap2borders[1][1] != None:
@@ -460,15 +553,17 @@ def compareTwoGaps(gap1, gap2, size, storeResults = True):
         with open(tempFastaFiles[3], 'w') as gap2right:
             gap2right.write('>gap2right\n')
             gap2right.write(str(gap2borders[1][1]))
-        rightalnResults = alignSeqsByStretcher('./temp/gap1right.temp.fasta', './temp/gap2right.temp.fasta')
+        rightalnResults = alignSeqsByBlast('./temp/gap1right.temp.fasta', './temp/gap2right.temp.fasta', gap1borders[1][0])
     else:
         logging.info('No sequences for the right border')
-        rightalnResults = {'Identity': -1, 'Gaps': 0}
+        rightalnResults = {'Identity': -1, 'Gaps': 0, 'Matches%': 0, 'AlnLen': 0, 'Mismatches': 0}
 
 
     #check if they are similar. If they are, then add borders
     response = [False, False]
     #todo - check if reverse complement sequences fuck with identity(use blast then)
+    #All of this is code for stretcher
+    '''
     if leftalnResults['Identity'] > 95 and leftalnResults['Gaps'] < 1:
         logging.debug('left sides match')
         response[0] = True
@@ -479,6 +574,22 @@ def compareTwoGaps(gap1, gap2, size, storeResults = True):
     if rightalnResults['Identity'] > 95 and rightalnResults['Gaps'] < 1:
         logging.debug('right sides match')
         response[0] = True
+        if storeResults == True:
+            gap1.addBorderGapRef(gap2, 'right')
+            gap2.addBorderGapRef(gap1, 'right')
+    '''
+    logging.debug('leftalnResults: {}'.format(leftalnResults))
+    if leftalnResults['Matches%'] > 95 and leftalnResults['AlnLen'] > 0.95:
+        logging.debug('left sides match')
+        response[0] = True
+        if storeResults == True:
+            gap1.addBorderGapRef(gap2, 'left')
+            gap2.addBorderGapRef(gap1, 'left')
+
+    logging.debug('rightalnResults: {}'.format(rightalnResults))
+    if rightalnResults['Matches%'] > 95 and leftalnResults['AlnLen'] > 0.95:
+        logging.debug('right sides match')
+        response[1] = True
         if storeResults == True:
             gap1.addBorderGapRef(gap2, 'right')
             gap2.addBorderGapRef(gap1, 'right')
@@ -497,9 +608,9 @@ def compareGapFamilies(gapFamily1, gapFamily2, size):
     # Actually we don't want all combinations either, we just want all combinations between 2 sets (e.g. if list1 = 25 and list2 = 15,
     # there would be 780 combinations but only 300 combinations between both sets -> Try list comprehensions instead, and build an iterator
     # if it becomes too much of a memory burden (it will)
-    totalNoOfCombinations = len(gapFamily1.gapList) * len(gapFamily2.gapList)
+    totalNoOfCombinations = len(gapFamily1.getGapsByType('analyze')) * len(gapFamily2.getGapsByType('analyze'))
     currComb = 0
-    combList = iter([(x, y) for x in gapFamily1.gapList for y in gapFamily2.gapList])
+    combList = iter([(x, y) for x in gapFamily1.getGapsByType('analyze') for y in gapFamily2.getGapsByType('analyze')])
 
     if not os.path.exists('./temp/'):
         os.mkdir('temp')
@@ -515,10 +626,9 @@ def compareGapFamilies(gapFamily1, gapFamily2, size):
 if __name__ == '__main__':
     masterFamilyList = []
 
-    blastFamilies = performBlastAgainstCore(fastaList, refFasta, 2000, 1000000, masterFamilyList)
+    blastFamilies = performBlastAgainstCore(fastaList, refFasta, 500, 2000, masterFamilyList)
     os.remove(os.curdir + '/blastSeqs.blastn')
     for family in masterFamilyList:
-        print('HONK')
         family.equalize()
 
     #Perform comparisons
@@ -528,7 +638,7 @@ if __name__ == '__main__':
 
     #Save the gap file, just in case something breaks so we don't have to do the analysis all over again
 
-    saveMasterFamilyList(masterFamilyList, 'masterListTest3.pk1')
+    saveMasterFamilyList(masterFamilyList, 'masterListTest.pk1')
 
     #masterFamilyList = loadMasterFamilyList('masterListTest.pk1')
 
